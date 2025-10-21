@@ -1,304 +1,163 @@
 #!/bin/sh
 
-# sing-box Alpine Linux 安装脚本
-# 用途：自动化安装 sing-box 到 Alpine Linux 系统
+# Debian 和 Alpine 的 Swap 删除脚本
+# 使用方法: sudo ./remove.sh
 
-set -e  # 遇到错误立即退出
+set -e
 
-# 颜色定义
+# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m' # 无颜色
 
-# 打印信息函数
+# 打印函数
 print_info() {
-    echo -e "${GREEN}[信息]${NC} $1"
+    echo "${GREEN}[信息]${NC} $1"
+}
+
+print_warn() {
+    echo "${YELLOW}[警告]${NC} $1"
 }
 
 print_error() {
-    echo -e "${RED}[错误]${NC} $1"
+    echo "${RED}[错误]${NC} $1"
 }
 
-print_warning() {
-    echo -e "${YELLOW}[警告]${NC} $1"
+print_success() {
+    echo "${GREEN}[成功]${NC} $1"
 }
 
-# 检查是否为 root 用户
+# 检查是否以 root 身份运行
 if [ "$(id -u)" -ne 0 ]; then
-    print_error "此脚本需要 root 权限运行，请使用 sudo 或以 root 用户执行"
+    print_error "此脚本必须以 root 身份运行"
     exit 1
 fi
 
-# 检查是否为 Alpine Linux
-if [ ! -f /etc/alpine-release ]; then
-    print_warning "检测到非 Alpine Linux 系统，脚本可能无法正常工作"
-fi
-
-# 配置变量（可通过环境变量覆盖）
-TR_PORT=${TR_PORT:-65031}
-VL_PORT=${VL_PORT:-65032}
-VL_SNI=${VL_SNI:-www.cityofrc.us}
-
-# 步骤1：配置环境变量
-print_info "步骤 1/9: 配置环境变量"
-
-# 默认版本号，可通过参数修改
-SING_BOX_VERSION=${1:-1.11.15}
-
-# 检测系统架构
-ARCH=$(case "$(uname -m)" in 
-    'x86_64') echo 'amd64';; 
-    'x86' | 'i686' | 'i386') echo '386';; 
-    'aarch64' | 'arm64') echo 'arm64';; 
-    'armv7l') echo 'armv7';; 
-    's390x') echo 's390x';; 
-    *) echo 'unsupported';; 
-esac)
-
-if [ "$ARCH" = "unsupported" ]; then
-    print_error "不支持的服务器架构: $(uname -m)"
-    exit 1
-fi
-
-print_info "检测到的服务器架构: $ARCH"
-print_info "sing-box 版本: $SING_BOX_VERSION"
-print_info "Trojan 端口: $TR_PORT"
-print_info "VLESS 端口: $VL_PORT"
-print_info "VLESS SNI: $VL_SNI"
-
-# 步骤2：下载文件
-print_info "步骤 2/9: 下载 sing-box"
-
-DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/v$SING_BOX_VERSION/sing-box-$SING_BOX_VERSION-linux-$ARCH.tar.gz"
-print_info "下载地址: $DOWNLOAD_URL"
-
-if ! wget -q --show-progress "$DOWNLOAD_URL"; then
-    print_error "下载失败，请检查网络连接或版本号是否正确"
-    exit 1
-fi
-
-# 步骤3：解压并安装
-print_info "步骤 3/9: 解压并安装可执行文件"
-
-if ! tar -zxf "sing-box-$SING_BOX_VERSION-linux-$ARCH.tar.gz"; then
-    print_error "解压失败"
-    exit 1
-fi
-
-mv "sing-box-$SING_BOX_VERSION-linux-$ARCH/sing-box" /usr/bin/
-chmod +x /usr/bin/sing-box
-
-print_info "sing-box 已安装到 /usr/bin/sing-box"
-
-# 步骤4：清理临时文件
-print_info "步骤 4/9: 清理临时文件"
-
-rm -rf "./sing-box-$SING_BOX_VERSION-linux-$ARCH"
-rm -f "./sing-box-$SING_BOX_VERSION-linux-$ARCH.tar.gz"
-
-# 步骤5：创建配置目录和服务文件
-print_info "步骤 5/9: 创建配置目录和 OpenRC 服务文件"
-
-# 创建配置目录
-mkdir -p /etc/sing-box
-mkdir -p /var/lib/sing-box
-
-# 创建 OpenRC 服务文件
-cat > /etc/init.d/sing-box << 'EOF'
-#!/sbin/openrc-run
-
-name=$RC_SVCNAME
-description="sing-box service"
-supervisor="supervise-daemon"
-command="/usr/bin/sing-box"
-extra_started_commands="reload checkconfig"
-
-: ${SINGBOX_CONFIG="/etc/sing-box"}
-
-if [ -d "$SINGBOX_CONFIG" ]; then
-	_config_opt="-C $SINGBOX_CONFIG"
-elif [ -z "$SINGBOX_CONFIG" ]; then
-	_config_opt=""
+# 检测操作系统
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
 else
-	_config_opt="-c $SINGBOX_CONFIG"
-fi
-
-command_args="run --disable-color
-	-D ${SINGBOX_WORKDIR:-"/var/lib/sing-box"}
-	$_config_opt"
-
-depend() {
-	after net dns
-}
-
-checkconfig() {
-	ebegin "Checking $RC_SVCNAME configuration"
-	sing-box check $_config_opt
-	eend $?
-}
-
-start_pre() {
-	checkconfig
-}
-
-reload() {
-	ebegin "Reloading $RC_SVCNAME"
-	checkconfig && $supervisor "$RC_SVCNAME" --signal HUP
-	eend $?
-}
-EOF
-
-# 步骤6：生成自签证书
-print_info "步骤 6/9: 安装 OpenSSL 并生成自签证书"
-
-# 安装 openssl（如果未安装）
-if ! command -v openssl >/dev/null 2>&1; then
-    print_info "正在安装 OpenSSL..."
-    apk add openssl
-else
-    print_info "OpenSSL 已安装"
-fi
-
-# 创建证书存储目录
-mkdir -p /etc/ssl/private
-
-# 生成自签证书
-print_info "正在生成自签证书 (域名: bing.com, 有效期: 36500天)..."
-openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
-    -keyout /etc/ssl/private/bing.com.key \
-    -out /etc/ssl/private/bing.com.crt \
-    -subj "/CN=bing.com" \
-    -days 36500
-
-# 设置证书文件权限
-chmod 644 /etc/ssl/private/bing.com.key
-chmod 644 /etc/ssl/private/bing.com.crt
-
-print_info "自签证书已生成:"
-
-# 步骤7：创建配置文件
-print_info "步骤 7/9: 创建 sing-box 配置文件"
-
-cat > /etc/sing-box/config.json << EOF
-{
-  "log": {
-    "disabled": false,
-    "level": "info",
-    "timestamp": true
-  },
-  "inbounds": [
-    {
-      "type": "trojan",
-      "tag": "trojan-in",
-      "listen": "::",
-      "listen_port": ${TR_PORT},
-      "users": [
-        {
-          "password": "hBh1uKxMhYr6yTc40MDIcg=="
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "www.bing.com",
-        "certificate_path": "/etc/ssl/private/bing.com.crt",
-        "key_path": "/etc/ssl/private/bing.com.key"
-      }
-    },
-    {
-      "type": "vless",
-      "tag": "real-in",
-      "listen": "::",
-      "listen_port": ${VL_PORT},
-      "users": [
-        {
-          "uuid": "43a1f08a-d9ff-4aea-ac8a-cc622caf62a5",
-          "flow": "xtls-rprx-vision"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "${VL_SNI}",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "${VL_SNI}",
-            "server_port": 443
-          },
-          "private_key": "IJ7MvrtAgMGCJdLk4JHtaRci5uAIa2SD5aNO0hsNJ2U",
-          "short_id": [
-            "4eae9cfd38fb5a8d"
-          ]
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    }
-  ]
-}
-EOF
-
-print_info "配置文件已创建: /etc/sing-box/config.json"
-
-# 验证配置文件
-print_info "正在验证配置文件..."
-if sing-box check -c /etc/sing-box/config.json; then
-    print_info "配置文件验证通过"
-else
-    print_error "配置文件验证失败，请检查配置"
+    print_error "无法检测操作系统"
     exit 1
 fi
 
-# 步骤8：配置自启动
-print_info "步骤 8/9: 配置 OpenRC 自启动"
+print_info "检测到的操作系统: $OS"
 
-chmod +x /etc/init.d/sing-box
+# 定义 swap 文件路径
+SWAP_FILE=/swapfile
 
-if rc-update add sing-box default; then
-    print_info "已添加到开机自启动"
+# 显示当前 swap 状态
+print_info "当前 swap 状态:"
+if swapon --show 2>/dev/null | grep -q .; then
+    swapon --show
+    echo
+    free -h
+    echo
 else
-    print_warning "添加自启动失败，请手动执行: rc-update add sing-box default"
+    print_warn "当前没有启用的 swap"
 fi
 
-# 步骤9：启动服务
-print_info "步骤 9/9: 启动 sing-box 服务"
-
-if rc-service sing-box start; then
-    print_info "sing-box 服务已成功启动"
+# 检查 swap 文件是否存在
+if [ ! -f "$SWAP_FILE" ]; then
+    print_warn "未找到 swap 文件 $SWAP_FILE"
     
-    # 等待1秒后检查服务状态
-    sleep 1
-    
-    if rc-service sing-box status > /dev/null 2>&1; then
-        print_info "服务运行状态: 正常运行"
+    # 检查是否有其他 swap 设备
+    if swapon --show 2>/dev/null | grep -q .; then
+        print_info "检测到其他 swap 设备，但不是 $SWAP_FILE"
+        printf "是否要继续清理 swap 配置? (y/N): "
+        read REPLY
+        if ! echo "$REPLY" | grep -qE '^[Yy]$'; then
+            print_info "已取消操作"
+            exit 0
+        fi
     else
-        print_warning "服务可能未正常运行，请检查日志"
+        print_info "系统中没有需要删除的 swap"
+        exit 0
     fi
 else
-    print_error "服务启动失败，请检查配置和日志"
-    print_info "可以使用以下命令查看日志:"
-    print_info "  tail -f /var/log/messages"
-    exit 1
+    print_warn "找到 swap 文件: $SWAP_FILE"
+    printf "确定要删除 swap 配置吗? 此操作不可恢复 (y/N): "
+    read REPLY
+    if ! echo "$REPLY" | grep -qE '^[Yy]$'; then
+        print_info "已取消操作"
+        exit 0
+    fi
 fi
 
-# 完成安装
-print_info "=========================================="
-print_info "sing-box 安装并启动完成！"
-print_info "=========================================="
-print_info "版本: $SING_BOX_VERSION"
-print_info "架构: $ARCH"
-print_info ""
-print_info "文件位置:"
-print_info "  配置文件: /etc/sing-box/config.json"
-print_info "  工作目录: /var/lib/sing-box"
-print_info "  证书文件: /etc/ssl/private/bing.com.crt"
-print_info "  密钥文件: /etc/ssl/private/bing.com.key"
-print_info ""
-print_info "服务状态:"
-print_info "  当前状态: 运行中"
-print_info "  开机自启: 已启用"
-print_info "=========================================="
+echo
+
+# 禁用 swap 文件
+if [ -f "$SWAP_FILE" ]; then
+    print_info "正在禁用 swap 文件..."
+    if swapoff "$SWAP_FILE" 2>/dev/null; then
+        print_success "Swap 文件已禁用"
+    else
+        print_warn "Swap 文件可能已经被禁用"
+    fi
+    
+    # 删除 swap 文件
+    print_info "正在删除 swap 文件..."
+    if rm -f "$SWAP_FILE"; then
+        print_success "Swap 文件已删除"
+    else
+        print_error "删除 swap 文件失败"
+    fi
+fi
+
+# 从 /etc/fstab 中移除 swap 条目
+print_info "正在从 /etc/fstab 中移除 swap 条目..."
+if grep -q "$SWAP_FILE" /etc/fstab 2>/dev/null; then
+    # 创建备份
+    cp /etc/fstab /etc/fstab.backup.$(date +%Y%m%d_%H%M%S)
+    print_info "已创建 /etc/fstab 备份"
+    
+    # 删除包含 swapfile 的行
+    sed -i "\#$SWAP_FILE#d" /etc/fstab
+    print_success "已从 /etc/fstab 中移除 swap 条目"
+else
+    print_warn "/etc/fstab 中未找到 swap 条目"
+fi
+
+# 移除 swappiness 配置
+print_info "正在移除 swappiness 配置..."
+
+# 处理 /etc/sysctl.conf
+if [ -f /etc/sysctl.conf ]; then
+    if grep -q "^vm.swappiness" /etc/sysctl.conf; then
+        cp /etc/sysctl.conf /etc/sysctl.conf.backup.$(date +%Y%m%d_%H%M%S)
+        print_info "已创建 /etc/sysctl.conf 备份"
+        
+        sed -i '/^vm.swappiness/d' /etc/sysctl.conf
+        print_success "已从 /etc/sysctl.conf 中移除 swappiness 配置"
+    fi
+fi
+
+# 处理 Alpine 的 sysctl.d 目录
+if [ "$OS" = "alpine" ] && [ -f /etc/sysctl.d/99-swappiness.conf ]; then
+    print_info "正在删除 Alpine swappiness 配置文件..."
+    rm -f /etc/sysctl.d/99-swappiness.conf
+    print_success "已删除 /etc/sysctl.d/99-swappiness.conf"
+fi
+
+# 重置 swappiness 为系统默认值
+print_info "正在重置 swappiness 为系统默认值 (60)..."
+sysctl vm.swappiness=60 2>/dev/null || true
+
+# 显示最终状态
+echo
+print_info "最终系统状态:"
+if swapon --show 2>/dev/null | grep -q .; then
+    print_warn "仍有以下 swap 设备处于活动状态:"
+    swapon --show
+else
+    print_success "所有 swap 已被禁用"
+fi
+
+echo
+free -h
+
+echo
+print_success "${GREEN}Swap 删除操作已完成!${NC}"
+print_info "提示: 配置文件的备份已保存，文件名包含时间戳"
