@@ -66,8 +66,8 @@ SWAP_FILE=/swapfile
 # 检查 swap 是否已存在
 if [ -f "$SWAP_FILE" ]; then
     print_warn "Swap 文件已存在于 $SWAP_FILE"
-    read -p "是否要删除并创建新的 swap 文件? (y/N): " -n 1 -r
-    echo
+    printf "是否要删除并创建新的 swap 文件? (y/N): "
+    read REPLY
     if echo "$REPLY" | grep -qE '^[Yy]$'; then
         print_info "正在删除现有 swap..."
         swapoff "$SWAP_FILE" 2>/dev/null || true
